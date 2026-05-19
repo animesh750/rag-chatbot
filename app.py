@@ -10,22 +10,22 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 # Load API key
 # ─────────────────────────────────────────
 def load_env():
-    # On Streamlit Cloud — use st.secrets
-    if "GROQ_API_KEY" in st.secrets:
-        os.environ["GROQ_API_KEY"] = st.secrets["GROQ_API_KEY"]
-    else:
-        # On local machine — use .env file
-        try:
-            with open(".env") as f:
-                for line in f:
-                    line = line.strip()
-                    if "=" in line and not line.startswith("#"):
-                        key, value = line.split("=", 1)
-                        os.environ[key.strip()] = value.strip()
-        except FileNotFoundError:
-            pass
+    try:
+        if st.secrets and "GROQ_API_KEY" in st.secrets:
+            os.environ["GROQ_API_KEY"] = st.secrets["GROQ_API_KEY"]
+            return
+    except Exception:
+        pass
+    try:
+        with open(".env") as f:
+            for line in f:
+                line = line.strip()
+                if "=" in line and not line.startswith("#"):
+                    key, value = line.split("=", 1)
+                    os.environ[key.strip()] = value.strip()
+    except FileNotFoundError:
+        pass
 
-load_env()
 # ─────────────────────────────────────────
 # Load embedding model once
 # ─────────────────────────────────────────
@@ -34,9 +34,21 @@ def load_embed_model():
     return SentenceTransformer("all-MiniLM-L6-v2")
 
 # ─────────────────────────────────────────
-# Process uploaded PDF
+# Get or create ChromaDB collection
 # ─────────────────────────────────────────
-def process_pdf(uploaded_file):
+@st.cache_resource
+def get_chroma_collection():
+    client = chromadb.PersistentClient(path="chroma_db")
+    try:
+        collection = client.get_collection("multi_docs")
+    except:
+        collection = client.create_collection("multi_docs")
+    return collection
+
+# ─────────────────────────────────────────
+# Process one PDF and ADD to existing collection
+# ─────────────────────────────────────────
+def process_and_add_pdf(uploaded_file, collection):
     pdf_bytes = uploaded_file.read()
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     full_text = ""
@@ -52,62 +64,101 @@ def process_pdf(uploaded_file):
     chunks = splitter.split_text(full_text)
 
     embed_model = load_embed_model()
-    embeddings = embed_model.encode(chunks).tolist()
+    embeddings = embed_model.encode(chunks, show_progress_bar=False).tolist()
 
-    client = chromadb.PersistentClient(path="chroma_db")
-    try:
-        client.delete_collection("my_documents")
-    except:
-        pass
-    collection = client.create_collection("my_documents")
+    safe_name = uploaded_file.name.replace(" ", "_").replace(".", "_")
+    ids = [f"{safe_name}_chunk_{i}" for i in range(len(chunks))]
+
     collection.add(
         documents=chunks,
         embeddings=embeddings,
-        ids=[f"chunk_{i}" for i in range(len(chunks))]
+        ids=ids,
+        metadatas=[{"source": uploaded_file.name} for _ in chunks]
     )
-    return collection, len(chunks)
+    return len(chunks)
 
 # ─────────────────────────────────────────
-# Search — now returns chunks WITH their IDs
+# Remove one PDF from collection
 # ─────────────────────────────────────────
-def search(question, collection, n_results=3):
+def remove_pdf_from_collection(filename, collection):
+    all_items = collection.get()
+    ids_to_delete = [
+        id_ for id_, meta in zip(all_items["ids"], all_items["metadatas"])
+        if meta.get("source") == filename
+    ]
+    if ids_to_delete:
+        collection.delete(ids=ids_to_delete)
+    return len(ids_to_delete)
+
+# ─────────────────────────────────────────
+# Search across ALL documents
+# ─────────────────────────────────────────
+def search(question, collection, n_results=4):
     embed_model = load_embed_model()
     question_embedding = embed_model.encode([question]).tolist()
+
+    total = collection.count()
+    if total == 0:
+        return [], []
+
+    n = min(n_results, total)
     results = collection.query(
         query_embeddings=question_embedding,
-        n_results=n_results
+        n_results=n
     )
-    # Return both the text chunks and their IDs
     chunks = results["documents"][0]
-    ids    = results["ids"][0]
-    return chunks, ids
+    metas  = results["metadatas"][0]
+    return chunks, metas
 
 # ─────────────────────────────────────────
-# Ask LLM
+# Ask LLM with memory
 # ─────────────────────────────────────────
-def ask_llm(question, context_chunks):
-    context = "\n\n---\n\n".join(context_chunks)
-    prompt = f"""You are a helpful assistant. Answer the user's question
-using ONLY the context provided below. If the answer is not in the
-context, say "I couldn't find that in the document."
+def ask_llm(question, context_chunks, context_metas, chat_history):
+    if not context_chunks:
+        return "I couldn't find any relevant information in the uploaded documents."
 
-CONTEXT:
+    context_parts = []
+    for chunk, meta in zip(context_chunks, context_metas):
+        source = meta.get("source", "unknown")
+        context_parts.append(f"[From: {source}]\n{chunk}")
+    context = "\n\n---\n\n".join(context_parts)
+
+    history_text = ""
+    for msg in chat_history[-6:]:
+        role = "User" if msg["role"] == "user" else "Assistant"
+        history_text += f"{role}: {msg['content']}\n"
+
+    system_prompt = """You are a helpful assistant that answers questions about uploaded documents.
+Rules:
+- Answer using ONLY the provided context
+- When using information from a specific document, mention which document it came from
+- If the answer is not in the context, say "I couldn't find that in the uploaded documents"
+- Handle follow-up questions using the conversation history
+- Keep answers clear and well-structured"""
+
+    user_prompt = f"""DOCUMENT CONTEXT:
 {context}
 
-QUESTION:
-{question}
+CONVERSATION HISTORY:
+{history_text}
+User: {question}
 
-ANSWER:"""
+Answer using the context and conversation history above."""
 
     groq_client = Groq(api_key=os.environ["GROQ_API_KEY"])
     response = groq_client.chat.completions.create(
         model="llama-3.3-70b-versatile",
-        messages=[{"role": "user", "content": prompt}]
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user",   "content": user_prompt}
+        ],
+        temperature=0.3,
+        max_tokens=1024
     )
     return response.choices[0].message.content
 
 # ─────────────────────────────────────────
-# STREAMLIT UI
+# PAGE CONFIG + CSS
 # ─────────────────────────────────────────
 st.set_page_config(
     page_title="RAG Chatbot",
@@ -115,97 +166,202 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("📄 Chat with your PDF")
-st.caption("Powered by LLaMA 3.3 + ChromaDB + Sentence Transformers — 100% Free")
+load_env()
 
-# ── Sidebar ──
+st.markdown("""
+<style>
+.source-card {
+    background: rgba(79, 139, 249, 0.08);
+    border-left: 3px solid #4f8bf9;
+    padding: 10px 14px;
+    border-radius: 4px;
+    margin: 6px 0;
+    font-size: 0.85rem;
+    color: #ccc;
+}
+.doc-badge {
+    display: inline-block;
+    background: rgba(79,139,249,0.15);
+    border: 1px solid #4f8bf9;
+    color: #4f8bf9;
+    padding: 3px 10px;
+    border-radius: 12px;
+    font-size: 0.78rem;
+    margin: 3px 2px;
+}
+.doc-badge-green {
+    display: inline-block;
+    background: rgba(40,167,69,0.15);
+    border: 1px solid #28a745;
+    color: #28a745;
+    padding: 3px 10px;
+    border-radius: 12px;
+    font-size: 0.78rem;
+    margin: 3px 2px;
+}
+</style>
+""", unsafe_allow_html=True)
+
+# ─────────────────────────────────────────
+# SESSION STATE INIT
+# ─────────────────────────────────────────
+if "messages"      not in st.session_state: st.session_state.messages      = []
+if "uploaded_docs" not in st.session_state: st.session_state.uploaded_docs = {}
+
+collection = get_chroma_collection()
+
+# ─────────────────────────────────────────
+# SIDEBAR
+# ─────────────────────────────────────────
 with st.sidebar:
-    st.header("Upload your PDF")
-    uploaded_file = st.file_uploader("Choose a PDF file", type="pdf")
+    st.title("📄 RAG Chatbot")
+    st.caption("Chat with multiple documents")
+    st.divider()
 
-    if uploaded_file is not None:
-        if "processed_file" not in st.session_state or \
-           st.session_state.processed_file != uploaded_file.name:
-            with st.spinner("Reading and indexing your PDF..."):
-                collection, num_chunks = process_pdf(uploaded_file)
-                st.session_state.collection = collection
-                st.session_state.processed_file = uploaded_file.name
-                st.session_state.num_chunks = num_chunks
+    st.header("📤 Upload PDFs")
+    uploaded_files = st.file_uploader(
+        "Add one or more PDFs",
+        type="pdf",
+        accept_multiple_files=True,
+        help="Upload multiple PDFs — all searchable together"
+    )
 
-        st.success(f"✅ {uploaded_file.name}")
-        st.caption(f"{st.session_state.num_chunks} chunks indexed")
+    if uploaded_files:
+        for uploaded_file in uploaded_files:
+            if uploaded_file.name not in st.session_state.uploaded_docs:
+                with st.spinner(f"Indexing {uploaded_file.name}..."):
+                    n_chunks = process_and_add_pdf(uploaded_file, collection)
+                    st.session_state.uploaded_docs[uploaded_file.name] = n_chunks
+                st.success(f"✅ {uploaded_file.name} — {n_chunks} chunks")
+
+    st.divider()
+
+    if st.session_state.uploaded_docs:
+        st.header("📚 Loaded Documents")
+        for filename, n_chunks in list(st.session_state.uploaded_docs.items()):
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                st.markdown(
+                    f'<div class="doc-badge-green">📄 {filename[:22]}{"..." if len(filename)>22 else ""}</div>',
+                    unsafe_allow_html=True
+                )
+                st.caption(f"{n_chunks} chunks")
+            with col2:
+                if st.button("🗑", key=f"del_{filename}", help=f"Remove {filename}"):
+                    remove_pdf_from_collection(filename, collection)
+                    del st.session_state.uploaded_docs[filename]
+                    st.session_state.messages = []
+                    st.rerun()
         st.divider()
-        st.caption("Model: LLaMA 3.3 70B")
-        st.caption("Embeddings: all-MiniLM-L6-v2")
-        st.caption("Vector DB: ChromaDB")
 
-        if st.button("🗑️ Clear chat"):
-            st.session_state.messages = []
-            st.rerun()
+    total_chunks = collection.count()
+    total_docs   = len(st.session_state.uploaded_docs)
+    col1, col2 = st.columns(2)
+    col1.metric("Documents", total_docs)
+    col2.metric("Chunks", total_chunks)
 
-# ── Main chat area ──
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+    st.divider()
+    st.caption("🧠 LLaMA 3.3 70B via Groq")
+    st.caption("📦 all-MiniLM-L6-v2 embeddings")
+    st.caption("🗄️ ChromaDB vector store")
+    st.divider()
 
-if "collection" not in st.session_state:
-    st.info("👈 Upload a PDF in the sidebar to get started!")
+    if st.button("🗑️ Clear chat history", use_container_width=True):
+        st.session_state.messages = []
+        st.rerun()
+
+    if st.button("🔄 Reset everything", use_container_width=True):
+        client = chromadb.PersistentClient(path="chroma_db")
+        try:
+            client.delete_collection("multi_docs")
+        except:
+            pass
+        st.session_state.messages      = []
+        st.session_state.uploaded_docs = {}
+        st.cache_resource.clear()
+        st.rerun()
+
+# ─────────────────────────────────────────
+# MAIN AREA
+# ─────────────────────────────────────────
+st.title("📄 Chat with your PDFs")
+
+if total_docs == 0:
+    st.info("👈 Upload one or more PDFs in the sidebar to get started!")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.markdown("### 📂 Multi-Document")
+        st.caption("Upload several PDFs at once and ask questions across all of them.")
+    with col2:
+        st.markdown("### 🧠 Smart Memory")
+        st.caption("Follow-up questions work naturally — it remembers the conversation.")
+    with col3:
+        st.markdown("### 📚 Cited Sources")
+        st.caption("Every answer shows which document and chunk it came from.")
     st.stop()
 
-# Display full chat history
+doc_badges = " ".join([
+    f'<span class="doc-badge">📄 {name[:20]}{"..." if len(name)>20 else ""}</span>'
+    for name in st.session_state.uploaded_docs.keys()
+])
+st.markdown(f"**Searching across:** {doc_badges}", unsafe_allow_html=True)
+st.divider()
+
+# Chat history
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.write(message["content"])
-
-        # Show citations if they exist for this message
         if "sources" in message and message["sources"]:
             with st.expander("📚 View Sources"):
-                for i, source in enumerate(message["sources"]):
-                    st.caption(f"**Source {i+1}:**")
-                    st.info(source[:300] + "..." if len(source) > 300 else source)
+                for i, (chunk, meta) in enumerate(
+                    zip(message["sources"], message["source_metas"])
+                ):
+                    source_name = meta.get("source", "unknown")
+                    st.markdown(
+                        f'<div class="source-card">'
+                        f'<b>Source {i+1}</b> · <code>{source_name}</code><br><br>'
+                        f'{chunk[:280]}{"..." if len(chunk) > 280 else ""}'
+                        f'</div>',
+                        unsafe_allow_html=True
+                    )
 
-# Greeting on empty chat
+# Greeting
 if len(st.session_state.messages) == 0:
     with st.chat_message("assistant"):
-        st.write("Hello! I've read your PDF. Ask me anything about it!")
+        doc_list = ", ".join(f"**{n}**" for n in st.session_state.uploaded_docs)
+        st.write(f"Hello! I've indexed {total_docs} document(s): {doc_list}. Ask me anything — I'll search across all of them!")
+        st.caption("💡 Try: 'Summarise all documents' or 'What topics are covered?'")
 
 # Chat input
-if question := st.chat_input("Ask a question about your PDF..."):
-
-    # Show user message
+if question := st.chat_input("Ask anything across your PDFs..."):
     with st.chat_message("user"):
         st.write(question)
-    st.session_state.messages.append({
-        "role": "user",
-        "content": question
-    })
+    st.session_state.messages.append({"role": "user", "content": question})
 
-    # Get answer + sources
     with st.chat_message("assistant"):
-        with st.spinner("Thinking..."):
-            relevant_chunks, chunk_ids = search(
-                question,
-                st.session_state.collection
+        with st.spinner("Searching documents..."):
+            chunks, metas = search(question, collection)
+            answer = ask_llm(
+                question, chunks, metas,
+                st.session_state.messages[:-1]
             )
-            answer = ask_llm(question, relevant_chunks)
-
-        # Show the answer
         st.write(answer)
 
-        # Show citations in an expandable section
-        with st.expander("📚 View Sources"):
-            for i, (source, chunk_id) in enumerate(
-                zip(relevant_chunks, chunk_ids)
-            ):
-                st.caption(f"**Source {i+1}** — `{chunk_id}`")
-                st.info(
-                    source[:300] + "..."
-                    if len(source) > 300
-                    else source
-                )
+        if chunks:
+            with st.expander("📚 View Sources"):
+                for i, (chunk, meta) in enumerate(zip(chunks, metas)):
+                    source_name = meta.get("source", "unknown")
+                    st.markdown(
+                        f'<div class="source-card">'
+                        f'<b>Source {i+1}</b> · <code>{source_name}</code><br><br>'
+                        f'{chunk[:280]}{"..." if len(chunk) > 280 else ""}'
+                        f'</div>',
+                        unsafe_allow_html=True
+                    )
 
-    # Save message with sources attached
     st.session_state.messages.append({
-        "role": "assistant",
-        "content": answer,
-        "sources": relevant_chunks
+        "role":         "assistant",
+        "content":      answer,
+        "sources":      chunks,
+        "source_metas": metas
     })
