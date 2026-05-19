@@ -1,8 +1,8 @@
-streamlit
-langchain
-langchain-community
-langchain-text-splitters
-chromadb
-pymupdf
-sentence-transformers
-groq
+streamlit==1.32.0
+langchain==0.1.20
+langchain-community==0.0.38
+langchain-text-splitters==0.0.2
+chromadb==0.4.24
+pymupdf==1.24.1
+sentence-transformers==2.7.0
+groq==0.5.0
