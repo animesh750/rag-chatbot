@@ -1,7 +1,8 @@
 streamlit
 langchain-text-splitters
-chromadb==0.4.24
+faiss-cpu
 pymupdf
 sentence-transformers
 groq
 fpdf2
+numpy

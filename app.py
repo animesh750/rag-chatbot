@@ -1,7 +1,8 @@
 import os
+import numpy as np
 import streamlit as st
 from sentence_transformers import SentenceTransformer
-import chromadb
+import faiss
 from groq import Groq
 import fitz
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -36,22 +37,28 @@ def load_embed_model():
     return SentenceTransformer("all-MiniLM-L6-v2")
 
 # ─────────────────────────────────────────
-# Get ChromaDB — always fresh on app start
+# FAISS index stored in session state
 # ─────────────────────────────────────────
-@st.cache_resource
-def get_chroma_collection():
-    client = chromadb.PersistentClient(path="chroma_db")
-    try:
-        client.delete_collection("multi_docs")
-    except:
-        pass
-    collection = client.create_collection("multi_docs")
-    return collection
+def get_faiss_store():
+    if "faiss_index" not in st.session_state:
+        st.session_state.faiss_index    = None
+        st.session_state.faiss_chunks   = []
+        st.session_state.faiss_metas    = []
+    return (
+        st.session_state.faiss_index,
+        st.session_state.faiss_chunks,
+        st.session_state.faiss_metas,
+    )
+
+def reset_faiss_store():
+    st.session_state.faiss_index  = None
+    st.session_state.faiss_chunks = []
+    st.session_state.faiss_metas  = []
 
 # ─────────────────────────────────────────
-# Process PDF
+# Process PDF and add to FAISS
 # ─────────────────────────────────────────
-def process_and_add_pdf(uploaded_file, collection):
+def process_and_add_pdf(uploaded_file):
     pdf_bytes = uploaded_file.read()
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     full_text = ""
@@ -60,53 +67,73 @@ def process_and_add_pdf(uploaded_file, collection):
     doc.close()
 
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=500,
-        chunk_overlap=50,
-        length_function=len,
+        chunk_size=500, chunk_overlap=50, length_function=len
     )
     chunks = splitter.split_text(full_text)
 
     embed_model = load_embed_model()
-    embeddings = embed_model.encode(chunks, show_progress_bar=False).tolist()
+    embeddings = embed_model.encode(chunks, show_progress_bar=False).astype("float32")
+    faiss.normalize_L2(embeddings)
 
-    safe_name = uploaded_file.name.replace(" ", "_").replace(".", "_")
-    ids = [f"{safe_name}_chunk_{i}" for i in range(len(chunks))]
+    _, existing_chunks, existing_metas = get_faiss_store()
 
-    collection.add(
-        documents=chunks,
-        embeddings=embeddings,
-        ids=ids,
-        metadatas=[{"source": uploaded_file.name} for _ in chunks]
+    if st.session_state.faiss_index is None:
+        dim = embeddings.shape[1]
+        st.session_state.faiss_index = faiss.IndexFlatIP(dim)
+
+    st.session_state.faiss_index.add(embeddings)
+    st.session_state.faiss_chunks.extend(chunks)
+    st.session_state.faiss_metas.extend(
+        [{"source": uploaded_file.name}] * len(chunks)
     )
     return len(chunks)
 
 # ─────────────────────────────────────────
-# Remove PDF from collection
+# Remove PDF from FAISS store
 # ─────────────────────────────────────────
-def remove_pdf_from_collection(filename, collection):
-    all_items = collection.get()
-    ids_to_delete = [
-        id_ for id_, meta in zip(all_items["ids"], all_items["metadatas"])
-        if meta.get("source") == filename
-    ]
-    if ids_to_delete:
-        collection.delete(ids=ids_to_delete)
+def remove_pdf(filename):
+    chunks = st.session_state.faiss_chunks
+    metas  = st.session_state.faiss_metas
+
+    keep_idx = [i for i, m in enumerate(metas) if m["source"] != filename]
+
+    if not keep_idx:
+        reset_faiss_store()
+        return
+
+    kept_chunks = [chunks[i] for i in keep_idx]
+    kept_metas  = [metas[i]  for i in keep_idx]
+
+    embed_model = load_embed_model()
+    embeddings  = embed_model.encode(kept_chunks, show_progress_bar=False).astype("float32")
+    faiss.normalize_L2(embeddings)
+
+    dim = embeddings.shape[1]
+    new_index = faiss.IndexFlatIP(dim)
+    new_index.add(embeddings)
+
+    st.session_state.faiss_index  = new_index
+    st.session_state.faiss_chunks = kept_chunks
+    st.session_state.faiss_metas  = kept_metas
 
 # ─────────────────────────────────────────
-# Search
+# Search FAISS
 # ─────────────────────────────────────────
-def search(question, collection, n_results=4):
-    embed_model = load_embed_model()
-    question_embedding = embed_model.encode([question]).tolist()
-    total = collection.count()
-    if total == 0:
+def search(question, n_results=4):
+    index, chunks, metas = get_faiss_store()
+    if index is None or len(chunks) == 0:
         return [], []
-    n = min(n_results, total)
-    results = collection.query(
-        query_embeddings=question_embedding,
-        n_results=n
-    )
-    return results["documents"][0], results["metadatas"][0]
+
+    embed_model = load_embed_model()
+    q_emb = embed_model.encode([question]).astype("float32")
+    faiss.normalize_L2(q_emb)
+
+    n = min(n_results, len(chunks))
+    _, indices = index.search(q_emb, n)
+
+    result_chunks = [chunks[i] for i in indices[0] if i < len(chunks)]
+    result_metas  = [metas[i]  for i in indices[0] if i < len(metas)]
+    return result_chunks, result_metas
 
 # ─────────────────────────────────────────
 # Ask LLM with memory
@@ -153,8 +180,7 @@ Answer using the context and conversation history above."""
         temperature=0.3,
         max_tokens=1024
     )
-    tokens_used = response.usage.total_tokens
-    return response.choices[0].message.content, tokens_used
+    return response.choices[0].message.content, response.usage.total_tokens
 
 # ─────────────────────────────────────────
 # Export chat to PDF
@@ -169,33 +195,27 @@ def export_chat_to_pdf(messages, doc_names):
 
     pdf.set_font("Helvetica", "B", 16)
     pdf.cell(0, 10, clean("RAG Chatbot - Conversation Export"), ln=True)
-
     pdf.set_font("Helvetica", "", 10)
     pdf.set_text_color(120, 120, 120)
     pdf.cell(0, 6, clean(f"Exported: {datetime.now().strftime('%Y-%m-%d %H:%M')}"), ln=True)
     pdf.cell(0, 6, clean(f"Documents: {', '.join(doc_names)}"), ln=True)
     pdf.ln(4)
-
     pdf.set_draw_color(200, 200, 200)
     pdf.line(10, pdf.get_y(), 200, pdf.get_y())
     pdf.ln(6)
 
     for msg in messages:
-        role = msg["role"]
-
-        if role == "user":
+        if msg["role"] == "user":
             pdf.set_font("Helvetica", "B", 11)
             pdf.set_text_color(60, 120, 220)
             pdf.cell(0, 8, "You:", ln=True)
-            pdf.set_font("Helvetica", "", 11)
-            pdf.set_text_color(30, 30, 30)
         else:
             pdf.set_font("Helvetica", "B", 11)
             pdf.set_text_color(40, 160, 80)
             pdf.cell(0, 8, "Assistant:", ln=True)
-            pdf.set_font("Helvetica", "", 11)
-            pdf.set_text_color(30, 30, 30)
 
+        pdf.set_font("Helvetica", "", 11)
+        pdf.set_text_color(30, 30, 30)
         pdf.set_x(10)
         pdf.multi_cell(190, 7, clean(msg["content"]))
         pdf.ln(3)
@@ -208,9 +228,8 @@ def export_chat_to_pdf(messages, doc_names):
             ):
                 src = meta.get("source", "unknown") if meta else "unknown"
                 snippet = chunk[:100].replace("\n", " ")
-                line = clean(f"Src {i+1} [{src[:30]}]: {snippet}")
                 pdf.set_x(10)
-                pdf.multi_cell(190, 5, line)
+                pdf.multi_cell(190, 5, clean(f"Src {i+1} [{src[:30]}]: {snippet}"))
             pdf.ln(2)
 
         pdf.set_draw_color(230, 230, 230)
@@ -222,18 +241,13 @@ def export_chat_to_pdf(messages, doc_names):
 # ─────────────────────────────────────────
 # PAGE CONFIG + CSS
 # ─────────────────────────────────────────
-st.set_page_config(
-    page_title="RAG Chatbot",
-    page_icon="📄",
-    layout="wide"
-)
-
+st.set_page_config(page_title="RAG Chatbot", page_icon="📄", layout="wide")
 load_env()
 
 st.markdown("""
 <style>
 .source-card {
-    background: rgba(79, 139, 249, 0.08);
+    background: rgba(79,139,249,0.08);
     border-left: 3px solid #4f8bf9;
     padding: 10px 14px;
     border-radius: 4px;
@@ -267,12 +281,13 @@ st.markdown("""
 # ─────────────────────────────────────────
 # SESSION STATE
 # ─────────────────────────────────────────
-if "messages"          not in st.session_state: st.session_state.messages          = []
-if "uploaded_docs"     not in st.session_state: st.session_state.uploaded_docs     = {}
-if "total_tokens"      not in st.session_state: st.session_state.total_tokens      = 0
-if "pending_question"  not in st.session_state: st.session_state.pending_question  = None
-
-collection = get_chroma_collection()
+if "messages"         not in st.session_state: st.session_state.messages         = []
+if "uploaded_docs"    not in st.session_state: st.session_state.uploaded_docs    = {}
+if "total_tokens"     not in st.session_state: st.session_state.total_tokens     = 0
+if "pending_question" not in st.session_state: st.session_state.pending_question = None
+if "faiss_index"      not in st.session_state: st.session_state.faiss_index      = None
+if "faiss_chunks"     not in st.session_state: st.session_state.faiss_chunks     = []
+if "faiss_metas"      not in st.session_state: st.session_state.faiss_metas      = []
 
 # ─────────────────────────────────────────
 # SIDEBAR
@@ -284,16 +299,14 @@ with st.sidebar:
 
     st.header("📤 Upload PDFs")
     uploaded_files = st.file_uploader(
-        "Add one or more PDFs",
-        type="pdf",
-        accept_multiple_files=True
+        "Add one or more PDFs", type="pdf", accept_multiple_files=True
     )
 
     if uploaded_files:
         for uploaded_file in uploaded_files:
             if uploaded_file.name not in st.session_state.uploaded_docs:
                 with st.spinner(f"Indexing {uploaded_file.name}..."):
-                    n_chunks = process_and_add_pdf(uploaded_file, collection)
+                    n_chunks = process_and_add_pdf(uploaded_file)
                     st.session_state.uploaded_docs[uploaded_file.name] = n_chunks
                 st.success(f"✅ {uploaded_file.name} — {n_chunks} chunks")
 
@@ -311,14 +324,14 @@ with st.sidebar:
                 st.caption(f"{n_chunks} chunks")
             with col2:
                 if st.button("🗑", key=f"del_{filename}"):
-                    remove_pdf_from_collection(filename, collection)
+                    remove_pdf(filename)
                     del st.session_state.uploaded_docs[filename]
                     st.session_state.messages = []
                     st.rerun()
         st.divider()
 
-    total_chunks = collection.count()
     total_docs   = len(st.session_state.uploaded_docs)
+    total_chunks = len(st.session_state.faiss_chunks)
 
     col1, col2 = st.columns(2)
     col1.metric("Documents", total_docs)
@@ -328,7 +341,7 @@ with st.sidebar:
     st.divider()
     st.caption("🧠 LLaMA 3.3 70B via Groq")
     st.caption("📦 all-MiniLM-L6-v2 embeddings")
-    st.caption("🗄️ ChromaDB vector store")
+    st.caption("🗄️ FAISS vector store")
     st.caption("💬 Conversation memory: 3 turns")
     st.divider()
 
@@ -352,16 +365,11 @@ with st.sidebar:
         st.rerun()
 
     if st.button("🔄 Reset everything", use_container_width=True):
-        client = chromadb.PersistentClient(path="chroma_db")
-        try:
-            client.delete_collection("multi_docs")
-        except:
-            pass
-        st.session_state.messages          = []
-        st.session_state.uploaded_docs     = {}
-        st.session_state.total_tokens      = 0
-        st.session_state.pending_question  = None
-        st.cache_resource.clear()
+        reset_faiss_store()
+        st.session_state.messages         = []
+        st.session_state.uploaded_docs    = {}
+        st.session_state.total_tokens     = 0
+        st.session_state.pending_question = None
         st.rerun()
 
 # ─────────────────────────────────────────
@@ -383,7 +391,6 @@ if total_docs == 0:
         st.caption("Download the full conversation as a PDF at any time.")
     st.stop()
 
-# Doc badges
 doc_badges = " ".join([
     f'<span class="doc-badge">📄 {name[:20]}{"..." if len(name)>20 else ""}</span>'
     for name in st.session_state.uploaded_docs.keys()
@@ -391,7 +398,6 @@ doc_badges = " ".join([
 st.markdown(f"**Searching across:** {doc_badges}", unsafe_allow_html=True)
 st.divider()
 
-# Chat history
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.write(message["content"])
@@ -404,12 +410,11 @@ for message in st.session_state.messages:
                     st.markdown(
                         f'<div class="source-card">'
                         f'<b>Source {i+1}</b> · <code>{source_name}</code><br><br>'
-                        f'{chunk[:280]}{"..." if len(chunk) > 280 else ""}'
+                        f'{chunk[:280]}{"..." if len(chunk)>280 else ""}'
                         f'</div>',
                         unsafe_allow_html=True
                     )
 
-# Greeting + suggested questions
 if len(st.session_state.messages) == 0:
     with st.chat_message("assistant"):
         doc_list = ", ".join(f"**{n}**" for n in st.session_state.uploaded_docs)
@@ -429,9 +434,7 @@ if len(st.session_state.messages) == 0:
             st.session_state.pending_question = suggestion
             st.rerun()
 
-# ─────────────────────────────────────────
-# HANDLE QUESTION — from chip or chat input
-# ─────────────────────────────────────────
+# Handle question
 question = None
 if st.session_state.pending_question:
     question = st.session_state.pending_question
@@ -446,7 +449,7 @@ if question:
 
     with st.chat_message("assistant"):
         with st.spinner("Searching documents..."):
-            chunks, metas = search(question, collection)
+            chunks, metas = search(question)
             answer, tokens = ask_llm(
                 question, chunks, metas,
                 st.session_state.messages[:-1]
@@ -462,7 +465,7 @@ if question:
                     st.markdown(
                         f'<div class="source-card">'
                         f'<b>Source {i+1}</b> · <code>{source_name}</code><br><br>'
-                        f'{chunk[:280]}{"..." if len(chunk) > 280 else ""}'
+                        f'{chunk[:280]}{"..." if len(chunk)>280 else ""}'
                         f'</div>',
                         unsafe_allow_html=True
                     )
