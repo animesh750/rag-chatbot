@@ -21,6 +21,7 @@ COPY rag/ rag/
 # Bake model weights into the image: fast cold starts, and no download at runtime.
 RUN python -m rag.warmup && chown -R app /opt/hf-cache
 COPY api.py ingest.py ./
+COPY frontend/ frontend/
 COPY docs/ docs/
 ENV HF_HUB_OFFLINE=1
 USER app

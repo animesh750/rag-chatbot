@@ -138,3 +138,9 @@ def test_uploaded_documents_survive_a_server_restart(tmp_path, monkeypatch, pdf_
         assert second.get("/health").json()["documents"] == 1
         hits = second.post("/search", json={"question": "Mikolov Word2Vec", "mode": "bm25"}).json()
         assert hits and hits[0]["source"] == "persist.pdf"
+
+
+def test_frontend_is_served_at_root(client):
+    r = client.get("/")
+    assert r.status_code == 200 and r.headers["content-type"].startswith("text/html")
+    assert "/query/stream" in r.text and "viewport" in r.text

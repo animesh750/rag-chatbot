@@ -14,10 +14,11 @@ import time
 import uuid
 from collections.abc import Iterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Literal
 
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Request, Response, UploadFile
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel, Field
 
@@ -186,6 +187,10 @@ def create_app(pipeline: RAGPipeline | None = None, persist: bool = True) -> Fas
                     duration_ms=round(elapsed * 1000, 1),
                 )
             request_id_var.reset(token)
+
+    @app.get("/", include_in_schema=False)
+    def frontend():
+        return FileResponse(Path(__file__).parent / "frontend" / "index.html")
 
     # ----- health & metrics ----------------------------------------------------------
     @app.get("/health", tags=["ops"])
