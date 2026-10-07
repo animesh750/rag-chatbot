@@ -1,0 +1,31 @@
+# docker compose up --build                       -> API on :8000 and UI on :8501
+# docker compose --profile monitoring up --build  -> also Prometheus on :9090
+services:
+  api:
+    build: { context: ., target: api }
+    ports: ["8000:8000"]
+    environment:
+      GROQ_API_KEY: ${GROQ_API_KEY:?Set GROQ_API_KEY in your .env file}
+      API_KEY: ${API_KEY:-}
+      DATA_DIR: /app/data/index
+    volumes:
+      - index-data:/app/data   # uploaded documents survive container restarts
+    restart: unless-stopped
+
+  ui:
+    build: { context: ., target: ui }
+    ports: ["8501:8501"]
+    environment:
+      GROQ_API_KEY: ${GROQ_API_KEY:?Set GROQ_API_KEY in your .env file}
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:latest
+    profiles: ["monitoring"]
+    ports: ["9090:9090"]
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    depends_on: [api]
+
+volumes:
+  index-data:

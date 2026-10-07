@@ -1,5 +1,8 @@
-# Streamlit UI (this is the file Streamlit Cloud installs)
-streamlit>=1.31
+# FastAPI service (no Streamlit)
+fastapi>=0.110
+uvicorn[standard]
+python-multipart
+pydantic>=2
 langchain-text-splitters
 faiss-cpu
 pymupdf

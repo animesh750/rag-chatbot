@@ -3,4 +3,8 @@ chroma_db/
 .env
 __pycache__/
 *.pyc
-.streamlit/
+.streamlit/data/
+.pytest_cache/
+.ruff_cache/
+.venv/
+.DS_Store
