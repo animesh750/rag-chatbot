@@ -1,0 +1,17 @@
+# Lightweight set used by CI and local testing. Deliberately excludes torch /
+# sentence-transformers: the tests use fake embedders and never download models.
+streamlit>=1.31
+fastapi>=0.110
+python-multipart
+httpx
+pydantic>=2
+langchain-text-splitters
+faiss-cpu
+pymupdf
+rank-bm25
+groq
+fpdf2
+numpy
+prometheus-client
+pytest
+ruff
