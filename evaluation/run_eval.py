@@ -104,7 +104,7 @@ def judge_answer(llm, question: str, reference: str, answer: str, context: str) 
     text, _ = llm.chat(
         [{"role": "system", "content": JUDGE_PROMPT}, {"role": "user", "content": prompt}],
         temperature=0.0,
-        max_tokens=40,
+        max_tokens=300,
     )
     m = re.search(r"\{.*?\}", text, re.S)
     try:

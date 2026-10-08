@@ -55,11 +55,13 @@ class FakeGroqClient:
         tokens: int = 42,
         fail_times: int = 0,
         fail_status: int = 429,
+        fail_message: str = "boom",
     ):
         self.replies = replies or {}
         self.tokens = tokens
         self.fail_times = fail_times
         self.fail_status = fail_status
+        self.fail_message = fail_message
         self.calls: list[dict] = []
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
 
@@ -67,7 +69,7 @@ class FakeGroqClient:
         self.calls.append(kw)
         if self.fail_times > 0:
             self.fail_times -= 1
-            err = RuntimeError("boom")
+            err = RuntimeError(self.fail_message)
             err.status_code = self.fail_status  # type: ignore[attr-defined]
             raise err
         text = self.replies.get(kw["model"], "Fake answer [1].")
@@ -127,12 +129,12 @@ def retriever(sample_chunks) -> HybridRetriever:
 
 @pytest.fixture()
 def fake_client() -> FakeGroqClient:
-    return FakeGroqClient(replies={"llama-3.1-8b-instant": "How many parameters does GPT3 have?"})
+    return FakeGroqClient(replies={"openai/gpt-oss-20b": "How many parameters does GPT3 have?"})
 
 
 @pytest.fixture()
 def pipeline(retriever, fake_client) -> RAGPipeline:
-    return RAGPipeline(retriever, GroqLLM(client=fake_client, rewrite_model="llama-3.1-8b-instant"))
+    return RAGPipeline(retriever, GroqLLM(client=fake_client, rewrite_model="openai/gpt-oss-20b"))
 
 
 @pytest.fixture()

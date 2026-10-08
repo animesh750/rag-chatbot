@@ -19,7 +19,7 @@ def patched(monkeypatch, retriever):
 
     monkeypatch.setattr(emb, "SentenceTransformerEmbedder", HashEmbedder)
     monkeypatch.setattr(emb, "CrossEncoderReranker", KeywordReranker)
-    client = FakeGroqClient(replies={"llama-3.1-8b-instant": "How many parameters does GPT3 have?"})
+    client = FakeGroqClient(replies={"openai/gpt-oss-20b": "How many parameters does GPT3 have?"})
     monkeypatch.setattr(GroqLLM, "_get_client", lambda self: client)
     return client
 
@@ -66,3 +66,12 @@ def test_deleting_a_document_removes_it_from_the_index(patched, retriever):
     assert "other.pdf" not in at.session_state["uploaded_docs"]
     assert "other.pdf" not in retriever.sources
     assert at.session_state["uploader_key"] == 1  # widget reset so the file isn't silently re-indexed
+
+
+def test_greeting_in_the_ui_is_not_reported_as_not_found(patched, retriever):
+    at = make_app(retriever).run()
+    at.chat_input[0].set_value("hellow").run()
+    assert not at.exception
+    answer = at.session_state["messages"][-1]["content"]
+    assert "ready to answer" in answer and "couldn't find" not in answer
+    assert patched.calls == []

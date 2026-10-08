@@ -333,7 +333,7 @@ def create_app(pipeline: RAGPipeline | None = None, persist: bool = True) -> Fas
                 },
             )
             if stream is None:
-                yield _sse("token", {"text": NOT_FOUND})
+                yield _sse("token", {"text": prep.direct_answer or NOT_FOUND})
                 yield _sse("done", {"total_tokens": 0, "timings_ms": prep.timings})
                 return
             start = time.perf_counter()

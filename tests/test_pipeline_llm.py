@@ -38,8 +38,8 @@ def test_follow_up_is_rewritten_with_the_small_model_and_used_for_retrieval(pipe
     ]
     res = pipeline.query("how many parameters does it have?", history, rerank=False)
     assert res.standalone_question == "How many parameters does GPT3 have?"
-    assert fake_client.calls[0]["model"] == "llama-3.1-8b-instant"
-    assert fake_client.calls[1]["model"] == "llama-3.3-70b-versatile"
+    assert fake_client.calls[0]["model"] == "openai/gpt-oss-20b"
+    assert fake_client.calls[1]["model"] == "openai/gpt-oss-120b"
     assert res.total_tokens == 84  # rewrite + answer
     assert "175 billion" in res.hits[0].chunk.text
 
@@ -107,3 +107,27 @@ def test_export_chat_to_pdf_returns_valid_pdf(retriever):
         ["notes.pdf"],
     )
     assert pdf.startswith(b"%PDF") and len(pdf) > 500
+
+
+def test_reasoning_effort_is_sent_only_to_gpt_oss_models():
+    client = FakeGroqClient()
+    GroqLLM(client=client, model="openai/gpt-oss-120b").chat([{"role": "user", "content": "hi"}])
+    GroqLLM(client=client, model="some/other-model").chat([{"role": "user", "content": "hi"}])
+    assert client.calls[0]["reasoning_effort"] == "low" and "reasoning_effort" not in client.calls[1]
+
+
+def test_retries_without_reasoning_effort_if_api_rejects_it():
+    client = FakeGroqClient(fail_times=1, fail_status=400, fail_message="reasoning_effort is not supported")
+    text, _ = GroqLLM(client=client, model="openai/gpt-oss-120b", max_retries=0).chat(
+        [{"role": "user", "content": "hi"}]
+    )
+    assert text and "reasoning_effort" in client.calls[0] and "reasoning_effort" not in client.calls[1]
+
+
+def test_small_talk_gets_a_friendly_reply_without_searching_or_calling_the_llm(pipeline, fake_client):
+    res = pipeline.query("hellow")
+    assert "ready to answer" in res.answer and res.hits == [] and res.total_tokens == 0
+    assert fake_client.calls == []
+    assert (
+        pipeline.prepare("thanks").direct_answer and pipeline.prepare("GPT3 parameters").direct_answer is None
+    )

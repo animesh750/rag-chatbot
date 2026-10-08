@@ -100,6 +100,12 @@ class GroqLLM:
             self._client = Groq(api_key=key)
         return self._client
 
+    @staticmethod
+    def _reasoning(model: str) -> dict:
+        if model.startswith("openai/gpt-oss") and config.REASONING_EFFORT:
+            return {"reasoning_effort": config.REASONING_EFFORT}
+        return {}
+
     def _create(self, **kwargs):
         client = self._get_client()
         last: Exception | None = None
@@ -109,6 +115,9 @@ class GroqLLM:
             except Exception as exc:  # groq raises RateLimitError, APIError, ...
                 last = exc
                 status = getattr(exc, "status_code", None)
+                if status == 400 and "reasoning_effort" in kwargs and "reasoning" in str(exc).lower():
+                    kwargs = {k: v for k, v in kwargs.items() if k != "reasoning_effort"}
+                    return self._create(**kwargs)
                 if status in (429, 500, 502, 503) and attempt < self.max_retries:
                     time.sleep(1.5 * (attempt + 1))
                     continue
@@ -128,6 +137,7 @@ class GroqLLM:
             messages=messages,
             temperature=config.LLM_TEMPERATURE if temperature is None else temperature,
             max_tokens=max_tokens or config.LLM_MAX_TOKENS,
+            **self._reasoning(model or self.model),
         )
         tokens = int(getattr(getattr(resp, "usage", None), "total_tokens", 0) or 0)
         LLM_TOKENS.inc(tokens)
@@ -140,6 +150,7 @@ class GroqLLM:
             temperature=config.LLM_TEMPERATURE,
             max_tokens=config.LLM_MAX_TOKENS,
             stream=True,
+            **self._reasoning(model or self.model),
         )
         holder: dict[str, TokenStream] = {}
 
@@ -169,7 +180,7 @@ class GroqLLM:
                 "content": f"CONVERSATION:\n{format_history(history)}\n\nLAST MESSAGE: {question}",
             },
         ]
-        text, tokens = self.chat(messages, model=self.rewrite_model, temperature=0.0, max_tokens=120)
+        text, tokens = self.chat(messages, model=self.rewrite_model, temperature=0.0, max_tokens=400)
         rewritten = text.strip().strip('"').splitlines()[0].strip() if text.strip() else ""
         # Guard against a rewriter that rambles: fall back to the original question.
         if not rewritten or len(rewritten) > 300:

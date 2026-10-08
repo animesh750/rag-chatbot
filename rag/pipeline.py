@@ -10,6 +10,7 @@ from . import config
 from .llm import GroqLLM, LLMError, TokenStream, build_answer_messages
 from .observability import QUERIES, get_logger, log_event, timed
 from .retriever import Hit, HybridRetriever, Mode
+from .smalltalk import classify, reply
 
 log = get_logger("rag.pipeline")
 
@@ -36,6 +37,7 @@ class PreparedQuery:
     timings: dict[str, float]
     tokens: int
     reranked: bool
+    direct_answer: str | None = None  # set for small talk: no search, no LLM call
 
 
 class RAGPipeline:
@@ -53,6 +55,11 @@ class RAGPipeline:
         sources: Iterable[str] | None = None,
         rewrite: bool = True,
     ) -> PreparedQuery:
+        kind = classify(question)
+        if kind:
+            answer = reply(kind, len(self.retriever.sources))
+            return PreparedQuery([], question, None, {}, 0, False, direct_answer=answer)
+
         timings: dict[str, float] = {}
         tokens = 0
 
@@ -90,6 +97,8 @@ class RAGPipeline:
     def query(self, question: str, history: Sequence[dict] = (), **kwargs) -> QueryResult:
         start = time.perf_counter()
         prep = self.prepare(question, history, **kwargs)
+        if prep.direct_answer:
+            return QueryResult(prep.direct_answer, [], question, {}, 0, False)
         if prep.messages is None:
             prep.timings["total_ms"] = round((time.perf_counter() - start) * 1000, 1)
             return QueryResult(NOT_FOUND, [], prep.standalone_question, prep.timings, prep.tokens, False)

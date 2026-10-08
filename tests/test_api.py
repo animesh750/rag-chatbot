@@ -144,3 +144,10 @@ def test_frontend_is_served_at_root(client):
     r = client.get("/")
     assert r.status_code == 200 and r.headers["content-type"].startswith("text/html")
     assert "/query/stream" in r.text and "viewport" in r.text
+
+
+def test_greeting_over_the_api_is_answered_directly(client, fake_client):
+    body = client.post("/query", json={"question": "hello"}).json()
+    assert "ready to answer" in body["answer"] and body["citations"] == [] and fake_client.calls == []
+    events = parse_sse(client.post("/query/stream", json={"question": "hellow"}).text)
+    assert "ready to answer" in events[1][1]["text"] and fake_client.calls == []

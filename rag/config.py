@@ -28,9 +28,9 @@ load_dotenv()
 # --- Models -----------------------------------------------------------------
 EMBED_MODEL = os.getenv("EMBED_MODEL", "all-MiniLM-L6-v2")
 RERANK_MODEL = os.getenv("RERANK_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
-LLM_MODEL = os.getenv("LLM_MODEL", "llama-3.3-70b-versatile")
+LLM_MODEL = os.getenv("LLM_MODEL", "openai/gpt-oss-120b")
 # Small, fast model used only to rewrite follow-up questions into standalone ones.
-REWRITE_MODEL = os.getenv("REWRITE_MODEL", "llama-3.1-8b-instant")
+REWRITE_MODEL = os.getenv("REWRITE_MODEL", "openai/gpt-oss-20b")
 
 # --- Chunking (same defaults as the original app so results stay comparable) --
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "500"))
@@ -45,7 +45,9 @@ DEFAULT_RERANK = _bool("DEFAULT_RERANK", True)
 
 # --- Generation ---------------------------------------------------------------
 LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.3"))
-LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "1024"))
+LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "2048"))  # headroom: reasoning models spend tokens thinking
+# gpt-oss models are reasoning models; "low" keeps answers fast and cheap. Empty string disables.
+REASONING_EFFORT = os.getenv("REASONING_EFFORT", "low")
 HISTORY_MESSAGES = int(os.getenv("HISTORY_MESSAGES", "6"))  # = last 3 turns
 
 # --- API ------------------------------------------------------------------------

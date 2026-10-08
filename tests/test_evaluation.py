@@ -76,11 +76,11 @@ def test_metrics_are_computed_correctly(sample_chunks):
 
 def test_judge_parses_json_even_with_chatter():
     llm = __import__("rag.llm", fromlist=["GroqLLM"]).GroqLLM(
-        client=FakeGroqClient(replies={"llama-3.3-70b-versatile": 'Sure! {"faithful": 1, "correct": 0}'})
+        client=FakeGroqClient(replies={"openai/gpt-oss-120b": 'Sure! {"faithful": 1, "correct": 0}'})
     )
     assert judge_answer(llm, "q", "ref", "ans", "ctx") == {"faithful": 1, "correct": 0}
     junk = __import__("rag.llm", fromlist=["GroqLLM"]).GroqLLM(
-        client=FakeGroqClient(replies={"llama-3.3-70b-versatile": "no json at all"})
+        client=FakeGroqClient(replies={"openai/gpt-oss-120b": "no json at all"})
     )
     assert judge_answer(junk, "q", "ref", "ans", "ctx") == {"faithful": 0, "correct": 0}
 

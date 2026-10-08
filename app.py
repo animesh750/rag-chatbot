@@ -60,14 +60,20 @@ MODE_LABELS = {
 # ─────────────────────────────────────────
 # Models are loaded once per server, the index is per browser session
 # ─────────────────────────────────────────
-@st.cache_resource(show_spinner="Loading embedding model...")
+@st.cache_resource(show_spinner="Loading the embedding model (first run downloads ~90 MB, please wait)...")
 def get_embedder():
-    return SentenceTransformerEmbedder()
+    embedder = SentenceTransformerEmbedder()
+    if hasattr(embedder, "warm"):
+        embedder.warm()  # pay the download/import cost at startup, not on the first upload
+    return embedder
 
 
-@st.cache_resource
+@st.cache_resource(show_spinner="Loading the reranking model (first run only)...")
 def get_reranker():
-    return CrossEncoderReranker()
+    reranker = CrossEncoderReranker()
+    if config.DEFAULT_RERANK and hasattr(reranker, "warm"):
+        reranker.warm()  # avoid a ~9 s stall on the first question
+    return reranker
 
 
 def get_pipeline() -> RAGPipeline:
@@ -300,7 +306,7 @@ if question:
                     question, history, mode=mode, rerank=rerank, k=k, sources=scope or None, rewrite=rewrite
                 )
             if prep.messages is None:
-                answer, tokens = NOT_FOUND, prep.tokens
+                answer, tokens = prep.direct_answer or NOT_FOUND, prep.tokens
                 st.write(answer)
             else:
                 stream = pipeline.stream(prep)

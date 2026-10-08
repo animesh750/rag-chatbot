@@ -8,3 +8,10 @@ __pycache__/
 .ruff_cache/
 .venv/
 .DS_Store
+
+*.patch
+update-*.zip
+rag-chatbot-upgraded.zip
+
+data/
+docs/screenshots/

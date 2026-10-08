@@ -39,6 +39,10 @@ class SentenceTransformerEmbedder:
                 self._model = SentenceTransformer(self.model_name)
         return self._model
 
+    def warm(self) -> None:
+        """Load the model now (downloads it on first run) instead of on first use."""
+        self._load()
+
     def encode(self, texts: Sequence[str]) -> np.ndarray:
         if len(texts) == 0:
             return np.zeros((0, 1), dtype="float32")
@@ -70,6 +74,10 @@ class CrossEncoderReranker:
 
                 self._model = CrossEncoder(self.model_name)
         return self._model
+
+    def warm(self) -> None:
+        """Load the model now (downloads it on first run) instead of on first use."""
+        self._load()
 
     def score(self, query: str, texts: Sequence[str]) -> list[float]:
         if not texts:
